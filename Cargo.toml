@@ -1,0 +1,21 @@
+[package]
+name = "rambo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "x11", "wayland", "glow"] }
+egui_dnd = "0.14"
+ksni = "0.2"
+notify-rust = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+signal-hook = "0.3"
+sysinfo = "0.30"
+toml = "0.8"
+
+[[bin]]
+name = "rambo"
+path = "src/main.rs"
