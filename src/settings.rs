@@ -1,12 +1,19 @@
 use crate::config::{Config, KillableApp};
+use crate::monitor::{SharedPressure, SharedRamMb, pressure_from_shared};
 use eframe::egui;
 use egui::{CentralPanel, ScrollArea};
 use egui_dnd::dnd;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Opens the settings window. Blocks until the window is closed.
 /// Must be called from the main thread (winit/eframe requirement).
-pub fn open_blocking(config: Arc<Mutex<Config>>) {
+pub fn open_blocking(
+    config: Arc<Mutex<Config>>,
+    shared_ram: SharedRamMb,
+    total_ram_mb: u64,
+    shared_pressure: SharedPressure,
+) {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Rambo — Settings")
@@ -17,45 +24,100 @@ pub fn open_blocking(config: Arc<Mutex<Config>>) {
 
     let new_name = Arc::new(Mutex::new(String::new()));
     let new_display = Arc::new(Mutex::new(String::new()));
+    let test_mode_active = Arc::new(AtomicBool::new(false));
+    let saved_threshold = Arc::new(AtomicU64::new(0));
 
     let _ = eframe::run_simple_native("rambo-settings", options, move |ctx, _frame| {
         ctx.set_pixels_per_point(1.2);
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         CentralPanel::default().show(ctx, |ui| {
             ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(8.0);
                 ui.heading("⚙ Rambo Settings");
+                ui.add_space(8.0);
+
+                // Live RAM progress bar
+                let free_mb = shared_ram.load(Ordering::Relaxed);
+                let ram_ratio = if total_ram_mb > 0 {
+                    (free_mb as f32 / total_ram_mb as f32).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let threshold = config.lock().unwrap().threshold_mb;
+                let bar_color = if free_mb < threshold {
+                    egui::Color32::from_rgb(220, 50, 50)
+                } else if free_mb < threshold.saturating_mul(2) {
+                    egui::Color32::from_rgb(230, 160, 0)
+                } else {
+                    egui::Color32::from_rgb(60, 180, 60)
+                };
+                ui.add(
+                    egui::ProgressBar::new(ram_ratio)
+                        .text(format!("Free RAM: {free_mb} MB / {total_ram_mb} MB"))
+                        .fill(bar_color),
+                );
+
+                // Memory pressure bar (when enabled)
+                let use_pressure = config.lock().unwrap().use_memory_pressure;
+                if use_pressure {
+                    let pressure = pressure_from_shared(&shared_pressure);
+                    let pressure_threshold = config.lock().unwrap().pressure_threshold_pct;
+                    let pressure_ratio = (pressure as f32 / 100.0).clamp(0.0, 1.0);
+                    let pressure_color = if pressure >= pressure_threshold {
+                        egui::Color32::from_rgb(220, 50, 50)
+                    } else {
+                        egui::Color32::from_rgb(60, 180, 60)
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(pressure_ratio)
+                            .text(format!("Memory Pressure: {pressure:.1}%"))
+                            .fill(pressure_color),
+                    );
+                }
+
                 ui.add_space(12.0);
 
                 ui.group(|ui| {
                     ui.label(egui::RichText::new("General").strong());
                     ui.add_space(4.0);
+
+                    // Snapshot the config briefly so the monitor thread is never blocked
+                    // during the entire frame render.
+                    let mut local = config.lock().unwrap().clone();
+                    let mut changed = false;
+
                     egui::Grid::new("general_grid")
                         .num_columns(2)
                         .spacing([16.0, 8.0])
                         .show(ui, |ui| {
-                            let mut cfg = config.lock().unwrap();
                             ui.label("RAM threshold (MB)");
-                            if ui.add(egui::DragValue::new(&mut cfg.threshold_mb).range(64..=65536)).changed() {
-                                let _ = cfg.save();
-                            }
+                            changed |= ui.add(egui::DragValue::new(&mut local.threshold_mb).range(64..=65536)).changed();
                             ui.end_row();
                             ui.label("Countdown (seconds)");
-                            if ui.add(egui::DragValue::new(&mut cfg.countdown_seconds).range(5..=300)).changed() {
-                                let _ = cfg.save();
-                            }
+                            changed |= ui.add(egui::DragValue::new(&mut local.countdown_seconds).range(5..=300)).changed();
                             ui.end_row();
                             ui.label("Check interval (seconds)");
-                            if ui.add(egui::DragValue::new(&mut cfg.check_interval_seconds).range(1..=60)).changed() {
-                                let _ = cfg.save();
-                            }
+                            changed |= ui.add(egui::DragValue::new(&mut local.check_interval_seconds).range(1..=60)).changed();
                             ui.end_row();
                             ui.label("Snooze duration (seconds)");
-                            if ui.add(egui::DragValue::new(&mut cfg.snooze_seconds).range(30..=3600)).changed() {
-                                let _ = cfg.save();
-                            }
+                            changed |= ui.add(egui::DragValue::new(&mut local.snooze_seconds).range(30..=3600)).changed();
                             ui.end_row();
+                            ui.label("Enable memory pressure");
+                            changed |= ui.checkbox(&mut local.use_memory_pressure, "").changed();
+                            ui.end_row();
+                            if local.use_memory_pressure {
+                                ui.label("Pressure threshold (%)");
+                                changed |= ui.add(egui::DragValue::new(&mut local.pressure_threshold_pct).range(1.0..=100.0).speed(0.5)).changed();
+                                ui.end_row();
+                            }
                         });
+
+                    if changed {
+                        let mut cfg = config.lock().unwrap();
+                        *cfg = local;
+                        let _ = cfg.save();
+                    }
                 });
 
                 ui.add_space(12.0);
@@ -156,6 +218,36 @@ pub fn open_blocking(config: Arc<Mutex<Config>>) {
                         drop(cfg);
                         name.clear();
                         display.clear();
+                    }
+                });
+
+                ui.add_space(12.0);
+
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Test Mode").strong());
+                    ui.add_space(4.0);
+
+                    let is_active = test_mode_active.load(Ordering::Relaxed);
+                    if is_active {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 50, 50),
+                            "⚠ Test mode active — threshold set to maximum",
+                        );
+                        ui.add_space(4.0);
+                        if ui.button("Deactivate").clicked() {
+                            let old = saved_threshold.load(Ordering::Relaxed);
+                            config.lock().unwrap().threshold_mb = old;
+                            test_mode_active.store(false, Ordering::Relaxed);
+                        }
+                    } else {
+                        ui.label("Temporarily set threshold to maximum to trigger kill logic.");
+                        ui.add_space(4.0);
+                        if ui.button("Test Mode").clicked() {
+                            let current = config.lock().unwrap().threshold_mb;
+                            saved_threshold.store(current, Ordering::Relaxed);
+                            config.lock().unwrap().threshold_mb = u64::MAX;
+                            test_mode_active.store(true, Ordering::Relaxed);
+                        }
                     }
                 });
 

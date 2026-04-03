@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::monitor::SharedRamMb;
+use crate::monitor::{SharedPressure, SharedRamMb, SharedTopProcs, pressure_from_shared};
 use ksni::menu::*;
 use ksni::Icon;
 use std::sync::atomic::Ordering;
@@ -11,6 +11,8 @@ struct RamboTray {
     config: Arc<Mutex<Config>>,
     total_ram_mb: u64,
     settings_tx: Sender<()>,
+    shared_top_procs: SharedTopProcs,
+    shared_pressure: SharedPressure,
 }
 
 /// Generates a 22×22 ARGB32 bar-gauge icon representing free RAM.
@@ -89,11 +91,20 @@ impl ksni::Tray for RamboTray {
 
     fn tool_tip(&self) -> ksni::ToolTip {
         let free_mb = self.shared_ram.load(Ordering::Relaxed);
+        let pressure = pressure_from_shared(&self.shared_pressure);
+        let top_procs = self.shared_top_procs.lock().unwrap().clone();
+
+        let mut desc = format!("Free RAM: {free_mb} MB | Pressure: {pressure:.1}%\n\nTop processes:");
+        for (i, (name, bytes)) in top_procs.iter().enumerate() {
+            let mb = *bytes as f64 / 1_048_576.0;
+            desc.push_str(&format!("\n{}. {} — {:.0} MB", i + 1, name, mb));
+        }
+
         ksni::ToolTip {
             icon_name: String::new(),
             icon_pixmap: vec![],
             title: "rambo".into(),
-            description: format!("Free RAM: {free_mb} MB"),
+            description: desc,
         }
     }
 
@@ -177,12 +188,16 @@ pub fn start(
     config: Arc<Mutex<Config>>,
     total_ram_mb: u64,
     settings_tx: Sender<()>,
+    shared_top_procs: SharedTopProcs,
+    shared_pressure: SharedPressure,
 ) -> TrayHandle {
     let service = ksni::TrayService::new(RamboTray {
         shared_ram,
         config,
         total_ram_mb,
         settings_tx,
+        shared_top_procs,
+        shared_pressure,
     });
     let handle = service.handle();
     service.spawn();

@@ -16,6 +16,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_pressure_threshold() -> f64 {
+    25.0
+}
+
 impl KillableApp {
     pub fn label(&self) -> &str {
         self.display_name.as_deref().unwrap_or(&self.name)
@@ -34,6 +38,10 @@ pub struct Config {
     pub snooze_seconds: u64,
     /// Ordered list of apps to kill (first enabled match wins)
     pub killable_apps: Vec<KillableApp>,
+    #[serde(default = "default_true")]
+    pub use_memory_pressure: bool,
+    #[serde(default = "default_pressure_threshold")]
+    pub pressure_threshold_pct: f64,
 }
 
 impl Default for Config {
@@ -52,6 +60,8 @@ impl Default for Config {
                 KillableApp { name: "code".to_string(),     display_name: Some("VS Code".to_string()),  enabled: true },
                 KillableApp { name: "gimp".to_string(),     display_name: Some("GIMP".to_string()),     enabled: true },
             ],
+            use_memory_pressure: true,
+            pressure_threshold_pct: 25.0,
         }
     }
 }
@@ -82,7 +92,7 @@ impl Config {
                     }
                     if cfg.save().is_ok() {
                         let _ = std::fs::remove_file(&json_path);
-                        println!("[rambo] Migrated config from JSON to TOML at {}", path.display());
+                        tracing::info!(path = %path.display(), "Migrated config from JSON to TOML");
                     }
                     return cfg;
                 }
@@ -93,16 +103,16 @@ impl Config {
             match std::fs::read_to_string(&path) {
                 Ok(content) => match toml::from_str::<Config>(&content) {
                     Ok(config) => return config,
-                    Err(e) => eprintln!("[rambo] Failed to parse config: {e}"),
+                    Err(e) => tracing::warn!(error = %e, "Failed to parse config"),
                 },
-                Err(e) => eprintln!("[rambo] Failed to read config: {e}"),
+                Err(e) => tracing::warn!(error = %e, "Failed to read config"),
             }
         }
         let default = Config::default();
         if let Err(e) = default.save() {
-            eprintln!("[rambo] Failed to write default config: {e}");
+            tracing::warn!(error = %e, "Failed to write default config");
         } else {
-            println!("[rambo] Created default config at {}", path.display());
+            tracing::info!(path = %path.display(), "Created default config");
         }
         default
     }
