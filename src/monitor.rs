@@ -1,4 +1,5 @@
 use crate::config::{Config, KillableApp};
+use crate::history::{SharedKillEvents, push_kill_event};
 use notify_rust::{Hint, Notification, Timeout, Urgency};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -211,7 +212,7 @@ fn kill_process(sys: &mut System, pids: &[Pid], app_label: &str) {
     }
 }
 
-pub fn run(config: Arc<Mutex<Config>>, shared_ram: SharedRamMb, shared_pressure: SharedPressure) {
+pub fn run(config: Arc<Mutex<Config>>, shared_ram: SharedRamMb, shared_pressure: SharedPressure, kill_events: SharedKillEvents) {
     let mut sys = System::new_all();
     let mut snooze_until: Option<Instant> = None;
 
@@ -221,6 +222,9 @@ pub fn run(config: Arc<Mutex<Config>>, shared_ram: SharedRamMb, shared_pressure:
 
         let cfg = config.lock().unwrap().clone();
         let free_mb = free_ram_mb(&sys);
+        let total_mb = total_ram_mb(&sys);
+        let used_mb = total_mb.saturating_sub(free_mb);
+        let free_pct = if total_mb > 0 { free_mb * 100 / total_mb } else { 0 };
         shared_ram.store(free_mb, Ordering::Relaxed);
 
         let pressure_val = read_pressure_avg10().unwrap_or(0.0);
@@ -234,7 +238,14 @@ pub fn run(config: Arc<Mutex<Config>>, shared_ram: SharedRamMb, shared_pressure:
 
         if (ram_trigger || pressure_trigger) && !snoozing {
             if ram_trigger {
-                tracing::info!(free_mb, threshold = cfg.threshold_mb, "Low RAM detected");
+                tracing::info!(
+                    free_mb,
+                    used_mb,
+                    total_mb,
+                    free_pct,
+                    threshold_mb = cfg.threshold_mb,
+                    "Low RAM detected"
+                );
             }
             if pressure_trigger {
                 tracing::info!(
@@ -254,11 +265,19 @@ pub fn run(config: Arc<Mutex<Config>>, shared_ram: SharedRamMb, shared_pressure:
                         Some(Instant::now() + Duration::from_secs(cfg.snooze_seconds));
                     tracing::info!(seconds = cfg.snooze_seconds, "Snoozed: kill of {app_label} cancelled by user");
                 } else {
+                    push_kill_event(&kill_events, app_label.clone());
                     kill_process(&mut sys, &pids, &app_label);
                     thread::sleep(Duration::from_secs(3));
                 }
             } else {
-                tracing::info!("Low RAM but no killable app is running");
+                tracing::info!(
+                    free_mb,
+                    used_mb,
+                    total_mb,
+                    free_pct,
+                    threshold_mb = cfg.threshold_mb,
+                    "Low RAM but no killable app is running"
+                );
             }
         }
 

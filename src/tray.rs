@@ -6,11 +6,16 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
+pub enum WindowRequest {
+    Settings,
+    History,
+}
+
 struct RamboTray {
     shared_ram: SharedRamMb,
     config: Arc<Mutex<Config>>,
     total_ram_mb: u64,
-    settings_tx: Sender<()>,
+    window_tx: Sender<WindowRequest>,
     shared_top_procs: SharedTopProcs,
     shared_pressure: SharedPressure,
 }
@@ -154,10 +159,20 @@ impl ksni::Tray for RamboTray {
             .into(),
             MenuItem::Separator,
             StandardItem {
+                label: "History…".into(),
+                icon_name: "office-chart-line".into(),
+                activate: Box::new(|this: &mut RamboTray| {
+                    let _ = this.window_tx.send(WindowRequest::History);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            StandardItem {
                 label: "Settings…".into(),
                 icon_name: "preferences-system".into(),
                 activate: Box::new(|this: &mut RamboTray| {
-                    let _ = this.settings_tx.send(());
+                    let _ = this.window_tx.send(WindowRequest::Settings);
                 }),
                 ..Default::default()
             }
@@ -187,7 +202,7 @@ pub fn start(
     shared_ram: SharedRamMb,
     config: Arc<Mutex<Config>>,
     total_ram_mb: u64,
-    settings_tx: Sender<()>,
+    window_tx: Sender<WindowRequest>,
     shared_top_procs: SharedTopProcs,
     shared_pressure: SharedPressure,
 ) -> TrayHandle {
@@ -195,7 +210,7 @@ pub fn start(
         shared_ram,
         config,
         total_ram_mb,
-        settings_tx,
+        window_tx,
         shared_top_procs,
         shared_pressure,
     });

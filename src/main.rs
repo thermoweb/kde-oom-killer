@@ -1,15 +1,20 @@
 mod config;
+mod history;
+mod log_capture;
 mod monitor;
 mod settings;
 mod tray;
 
 use clap::Parser;
 use config::Config;
+use history::{new_shared_history, new_shared_kill_events, new_shared_log_lines, push_sample};
+use log_capture::LogCaptureLayer;
 use monitor::{new_shared_pressure, new_shared_ram, new_shared_top_procs};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tray::WindowRequest;
 
 /// Proactive memory-pressure killer for Linux desktops.
 #[derive(Parser, Debug)]
@@ -28,30 +33,37 @@ struct Args {
     interval: Option<u64>,
 }
 
-fn init_tracing() {
+fn init_tracing(log_lines: history::SharedLogLines) {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::EnvFilter;
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
+    // The in-app log panel only shows rambo's own logs, not third-party noise.
+    let capture = LogCaptureLayer { log_lines };
+
     match tracing_journald::layer() {
         Ok(journald_layer) => {
             tracing_subscriber::registry()
                 .with(filter)
                 .with(journald_layer)
+                .with(capture)
                 .init();
         }
         Err(_) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer())
+                .with(capture)
                 .init();
         }
     }
 }
 
 fn main() {
-    init_tracing();
+    let shared_log_lines = new_shared_log_lines();
+    init_tracing(Arc::clone(&shared_log_lines));
     let args = Args::parse();
 
     tracing::info!("Starting…");
@@ -75,6 +87,8 @@ fn main() {
     let shared_ram = new_shared_ram();
     let shared_top_procs = new_shared_top_procs();
     let shared_pressure = new_shared_pressure();
+    let shared_history = new_shared_history();
+    let shared_kill_events = new_shared_kill_events();
 
     let total_ram_mb = {
         use sysinfo::System;
@@ -82,15 +96,15 @@ fn main() {
         monitor::total_ram_mb(&sys)
     };
 
-    // Channel: tray sends () to ask the main thread to open the settings window.
-    let (settings_tx, settings_rx) = mpsc::channel::<()>();
+    // Channel: tray sends WindowRequest to ask the main thread to open a window.
+    let (window_tx, window_rx) = mpsc::channel::<WindowRequest>();
 
     // Tray + RAM refresh run in background threads.
     let tray_handle = tray::start(
         Arc::clone(&shared_ram),
         Arc::clone(&config),
         total_ram_mb,
-        settings_tx,
+        window_tx,
         Arc::clone(&shared_top_procs),
         Arc::clone(&shared_pressure),
     );
@@ -99,6 +113,7 @@ fn main() {
         let shared_ram_tray = shared_ram.clone();
         let shared_top_procs_tray = shared_top_procs.clone();
         let shared_pressure_tray = shared_pressure.clone();
+        let shared_history_tray = shared_history.clone();
         std::thread::spawn(move || {
             use sysinfo::System;
             let mut sys = System::new_all();
@@ -114,6 +129,8 @@ fn main() {
                 let pressure = monitor::read_pressure_avg10().unwrap_or(0.0);
                 shared_pressure_tray.store(pressure.to_bits(), Ordering::Relaxed);
 
+                push_sample(&shared_history_tray, free_mb, pressure);
+
                 tray_handle.notify();
                 std::thread::sleep(Duration::from_secs(2));
             }
@@ -125,17 +142,27 @@ fn main() {
         let config = Arc::clone(&config);
         let shared_ram = Arc::clone(&shared_ram);
         let shared_pressure = Arc::clone(&shared_pressure);
-        std::thread::spawn(move || monitor::run(config, shared_ram, shared_pressure));
+        let shared_kill_events = Arc::clone(&shared_kill_events);
+        std::thread::spawn(move || monitor::run(config, shared_ram, shared_pressure, shared_kill_events));
     }
 
-    // Main thread: block waiting for settings-open requests, then run the window.
+    // Main thread: block waiting for window-open requests, then run the window.
     // eframe/winit requires the event loop on the main thread.
-    for () in settings_rx {
-        settings::open_blocking(
-            Arc::clone(&config),
-            Arc::clone(&shared_ram),
-            total_ram_mb,
-            Arc::clone(&shared_pressure),
-        );
+    for req in window_rx {
+        match req {
+            WindowRequest::Settings => settings::open_blocking(
+                Arc::clone(&config),
+                Arc::clone(&shared_ram),
+                total_ram_mb,
+                Arc::clone(&shared_pressure),
+            ),
+            WindowRequest::History => history::open_blocking(
+                Arc::clone(&shared_history),
+                Arc::clone(&shared_kill_events),
+                Arc::clone(&shared_log_lines),
+                Arc::clone(&config),
+                total_ram_mb,
+            ),
+        }
     }
 }
