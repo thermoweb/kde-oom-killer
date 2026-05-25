@@ -7,8 +7,10 @@ INSTALL_DIR="${HOME}/.local/bin"
 echo "🛑 Stopping ${BINARY_NAME}…"
 systemctl --user stop "${BINARY_NAME}.service"
 
+source "$(dirname "$0")/_detect.sh"
+
 echo "🔨 Building ${BINARY_NAME}…"
-cargo build --release
+cargo build --release $FEATURES
 
 echo "📦 Updating binary in ${INSTALL_DIR}/"
 cp "target/release/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
