@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-pub const MAX_SAMPLES: usize = 900; // ~30 min at 2 s intervals
+pub const MAX_SAMPLES: usize = 1800; // ~1 hour at 2 s intervals
+pub const HISTORY_WINDOW_SECS: f64 = 3600.0;
 pub const MAX_LOG_LINES: usize = 200;
 
 static APP_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
@@ -109,21 +110,37 @@ pub fn open_blocking(
                 let use_pressure = config.lock().unwrap().use_memory_pressure;
                 let pressure_threshold = config.lock().unwrap().pressure_threshold_pct;
 
-                let history: Vec<HistorySample> =
-                    shared_history.lock().unwrap().iter().cloned().collect();
-                let kill_events: Vec<KillEvent> =
-                    shared_kill_events.lock().unwrap().clone();
+                let now = elapsed_secs();
+                let history: Vec<HistorySample> = shared_history
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|s| now - s.elapsed_secs <= HISTORY_WINDOW_SECS)
+                    .cloned()
+                    .collect();
+                let kill_events: Vec<KillEvent> = shared_kill_events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|e| now - e.elapsed_secs <= HISTORY_WINDOW_SECS)
+                    .cloned()
+                    .collect();
 
                 // ── RAM chart ───────────────────────────────────────────────
                 ui.label(egui::RichText::new("Free RAM (MB)").strong());
 
-                let ram_points: PlotPoints =
-                    history.iter().map(|s| [s.elapsed_secs, s.free_mb]).collect();
+                let ram_points: PlotPoints = history
+                    .iter()
+                    .map(|s| [s.elapsed_secs - now, s.free_mb])
+                    .collect();
 
                 Plot::new("ram_chart")
                     .height(180.0)
+                    .include_x(-HISTORY_WINDOW_SECS)
+                    .include_x(0.0)
                     .include_y(0.0)
                     .include_y(total_ram_mb as f64)
+                    .x_axis_label("seconds ago")
                     .y_axis_label("MB")
                     .show(ui, |plot_ui| {
                         // Threshold dashed line
@@ -135,8 +152,11 @@ pub fn open_blocking(
                         // Kill event vertical markers
                         for ev in &kill_events {
                             plot_ui.vline(
-                                VLine::new(format!("💀 {}", ev.app_name), ev.elapsed_secs)
-                                    .color(egui::Color32::from_rgb(230, 60, 60)),
+                                VLine::new(
+                                    format!("💀 {}", ev.app_name),
+                                    ev.elapsed_secs - now,
+                                )
+                                .color(egui::Color32::from_rgb(230, 60, 60)),
                             );
                         }
                         // RAM line
@@ -154,13 +174,16 @@ pub fn open_blocking(
                 if use_pressure {
                     let pressure_points: PlotPoints = history
                         .iter()
-                        .map(|s| [s.elapsed_secs, s.pressure])
+                        .map(|s| [s.elapsed_secs - now, s.pressure])
                         .collect();
 
                     Plot::new("pressure_chart")
                         .height(120.0)
+                        .include_x(-HISTORY_WINDOW_SECS)
+                        .include_x(0.0)
                         .include_y(0.0)
                         .include_y(100.0)
+                        .x_axis_label("seconds ago")
                         .y_axis_label("%")
                         .show(ui, |plot_ui| {
                             plot_ui.hline(
@@ -170,8 +193,11 @@ pub fn open_blocking(
                             );
                             for ev in &kill_events {
                                 plot_ui.vline(
-                                    VLine::new(format!("💀 {}", ev.app_name), ev.elapsed_secs)
-                                        .color(egui::Color32::from_rgb(230, 60, 60)),
+                                    VLine::new(
+                                        format!("💀 {}", ev.app_name),
+                                        ev.elapsed_secs - now,
+                                    )
+                                    .color(egui::Color32::from_rgb(230, 60, 60)),
                                 );
                             }
                             plot_ui.line(

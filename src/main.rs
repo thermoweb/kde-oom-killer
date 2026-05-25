@@ -1,9 +1,9 @@
 mod config;
+mod desktop;
 mod history;
 mod log_capture;
 mod monitor;
 mod settings;
-mod tray;
 
 use clap::Parser;
 use config::Config;
@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tray::WindowRequest;
+use desktop::WindowRequest;
 
 /// Proactive memory-pressure killer for Linux desktops.
 #[derive(Parser, Debug)]
@@ -96,11 +96,29 @@ fn main() {
         monitor::total_ram_mb(&sys)
     };
 
+    {
+        let cfg = config.lock().unwrap();
+        let killable: Vec<&str> = cfg.killable_apps.iter()
+            .filter(|a| a.enabled)
+            .map(|a| a.label())
+            .collect();
+        tracing::info!(
+            total_ram_mb,
+            threshold_mb = cfg.threshold_mb,
+            countdown_secs = cfg.countdown_seconds,
+            check_interval_secs = cfg.check_interval_seconds,
+            memory_pressure = cfg.use_memory_pressure,
+            pressure_threshold_pct = cfg.pressure_threshold_pct,
+            kill_priority = ?killable,
+            "Ready"
+        );
+    }
+
     // Channel: tray sends WindowRequest to ask the main thread to open a window.
     let (window_tx, window_rx) = mpsc::channel::<WindowRequest>();
 
     // Tray + RAM refresh run in background threads.
-    let tray_handle = tray::start(
+    let tray_handle = desktop::start(
         Arc::clone(&shared_ram),
         Arc::clone(&config),
         total_ram_mb,

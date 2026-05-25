@@ -1,15 +1,11 @@
 use crate::config::Config;
 use crate::monitor::{SharedPressure, SharedRamMb, SharedTopProcs, pressure_from_shared};
-use ksni::menu::*;
 use ksni::Icon;
+use ksni::menu::*;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-
-pub enum WindowRequest {
-    Settings,
-    History,
-}
+use super::WindowRequest;
 
 struct RamboTray {
     shared_ram: SharedRamMb,
@@ -20,23 +16,19 @@ struct RamboTray {
     shared_pressure: SharedPressure,
 }
 
-/// Generates a 22×22 ARGB32 bar-gauge icon representing free RAM.
-///
-/// The bar fills from the bottom proportional to `free_mb / total_mb` and
-/// is coloured green (healthy), amber (approaching threshold), or red (critical).
 fn make_ram_icon(free_mb: u64, total_mb: u64, threshold_mb: u64) -> Vec<Icon> {
     const W: usize = 22;
     const H: usize = 22;
     let mut data = vec![0u8; W * H * 4];
 
     let (r, g, b): (u8, u8, u8) = if total_mb == 0 || free_mb == 0 {
-        (128, 128, 128) // gray – not yet loaded
+        (128, 128, 128)
     } else if free_mb < threshold_mb {
-        (220, 50, 50) // red – critical
+        (220, 50, 50)
     } else if free_mb < threshold_mb * 2 {
-        (230, 160, 0) // amber – low
+        (230, 160, 0)
     } else {
-        (60, 180, 60) // green – healthy
+        (60, 180, 60)
     };
 
     let ratio = if total_mb > 0 {
@@ -45,7 +37,6 @@ fn make_ram_icon(free_mb: u64, total_mb: u64, threshold_mb: u64) -> Vec<Icon> {
         0.5
     };
 
-    // Inner bar area: 2 px border on each side → 18 rows of fill
     let inner_h = H - 4;
     let fill_height = (inner_h as f64 * ratio).round() as usize;
     let fill_start_y = H - 2 - fill_height;
@@ -56,7 +47,6 @@ fn make_ram_icon(free_mb: u64, total_mb: u64, threshold_mb: u64) -> Vec<Icon> {
             let border = x < 2 || x >= W - 2 || y < 2 || y >= H - 2;
             let filled = !border && y >= fill_start_y;
 
-            // ARGB32 network byte order: [A, R, G, B]
             let (a, pr, pg, pb): (u8, u8, u8, u8) = if border {
                 (255, 80, 80, 80)
             } else if filled {
@@ -80,7 +70,6 @@ fn make_ram_icon(free_mb: u64, total_mb: u64, threshold_mb: u64) -> Vec<Icon> {
 
 impl ksni::Tray for RamboTray {
     fn icon_name(&self) -> String {
-        // Return empty so the DE uses icon_pixmap instead of a named system icon
         String::new()
     }
 
@@ -189,7 +178,6 @@ impl ksni::Tray for RamboTray {
     }
 }
 
-/// Opaque handle to the tray service. Call `notify()` to push a property refresh.
 pub struct TrayHandle(ksni::Handle<RamboTray>);
 
 impl TrayHandle {
