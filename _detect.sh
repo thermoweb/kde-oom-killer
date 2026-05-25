@@ -8,7 +8,16 @@ if [[ "$DESKTOP" == *"GNOME"* ]]; then
         FEATURES=""
     else
         echo "GNOME detected without AppIndicator extension — building fallback mode."
-        echo "Tip: install https://extensions.gnome.org/extension/615/appindicator-support/ for a tray icon."
+        echo ""
+        echo "⚠  WARNING: the system tray icon will not be available."
+        echo "   To get the full experience, install the AppIndicator extension:"
+        echo ""
+        echo "     sudo apt install gnome-shell-extension-appindicator   # Ubuntu/Debian"
+        echo "     sudo dnf install gnome-shell-extension-appindicator   # Fedora"
+        echo "     or: https://extensions.gnome.org/extension/615/appindicator-support/"
+        echo ""
+        echo "   Then log out / back in and re-run this script."
+        echo ""
         FEATURES="--no-default-features"
     fi
 else
