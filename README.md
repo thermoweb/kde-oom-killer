@@ -4,8 +4,7 @@ A lightweight Rust daemon that monitors RAM usage and automatically kills a
 configurable list of applications when memory gets critically low — before the
 system freezes.
 
-Works on **KDE Plasma** and **GNOME** (any desktop with a StatusNotifierItem
-system tray and libnotify notifications).
+Works on **KDE Plasma** and **GNOME** (see [GNOME compatibility](#gnome-compatibility)).
 
 ## How it works
 
@@ -101,6 +100,45 @@ enabled = true
 
 The `name` field does a **case-insensitive substring match** on the process
 name, so `"firefox"` matches `firefox`, `firefox-bin`, etc.
+
+## GNOME compatibility
+
+rambo works on GNOME in two modes depending on whether you have the
+[AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/)
+extension installed.
+
+**With the extension (recommended)** — full experience, identical to KDE.
+The system tray icon appears and everything works out of the box.
+`./install.sh` detects this automatically and builds the right binary.
+
+Install the extension via your package manager:
+
+```bash
+sudo apt install gnome-shell-extension-appindicator   # Ubuntu / Debian
+sudo dnf install gnome-shell-extension-appindicator   # Fedora
+```
+
+Or from the browser: [extensions.gnome.org/extension/615](https://extensions.gnome.org/extension/615/appindicator-support/)
+
+Then log out and back in (or run `gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com`).
+
+**Without the extension** — fallback mode. No tray icon, but monitoring,
+process killing, and desktop notifications all work normally. The settings
+window opens on startup so you can adjust the config; after closing it the
+daemon keeps running in the background.
+
+The install script auto-detects which mode to use:
+
+```bash
+./install.sh   # detects GNOME, checks for the extension, builds accordingly
+```
+
+To build manually for each mode:
+
+```bash
+cargo build --release                    # SNI tray (KDE, or GNOME + extension)
+cargo build --release --no-default-features  # fallback window (GNOME, no extension)
+```
 
 ## CLI flags
 
