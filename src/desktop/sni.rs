@@ -178,11 +178,13 @@ impl ksni::Tray for RamboTray {
     }
 }
 
-pub struct TrayHandle(ksni::Handle<RamboTray>);
+pub struct TrayHandle(Arc<Mutex<Option<ksni::Handle<RamboTray>>>>);
 
 impl TrayHandle {
     pub fn notify(&self) {
-        self.0.update(|_| {});
+        if let Some(h) = self.0.lock().unwrap().as_ref() {
+            h.update(|_| {});
+        }
     }
 }
 
@@ -194,15 +196,30 @@ pub fn start(
     shared_top_procs: SharedTopProcs,
     shared_pressure: SharedPressure,
 ) -> TrayHandle {
-    let service = ksni::TrayService::new(RamboTray {
-        shared_ram,
-        config,
-        total_ram_mb,
-        window_tx,
-        shared_top_procs,
-        shared_pressure,
+    let shared_handle: Arc<Mutex<Option<ksni::Handle<RamboTray>>>> = Arc::new(Mutex::new(None));
+    let shared_handle_bg = Arc::clone(&shared_handle);
+
+    std::thread::spawn(move || loop {
+        let service = ksni::TrayService::new(RamboTray {
+            shared_ram: Arc::clone(&shared_ram),
+            config: Arc::clone(&config),
+            total_ram_mb,
+            window_tx: window_tx.clone(),
+            shared_top_procs: Arc::clone(&shared_top_procs),
+            shared_pressure: Arc::clone(&shared_pressure),
+        });
+        *shared_handle_bg.lock().unwrap() = Some(service.handle());
+
+        // run() returns Err if the D-Bus registration fails (e.g. StatusNotifierWatcher
+        // not yet up at boot). Clear the handle, wait, then retry.
+        if let Err(e) = service.run() {
+            tracing::warn!("Tray service error: {e}, retrying in 5s…");
+            *shared_handle_bg.lock().unwrap() = None;
+            std::thread::sleep(std::time::Duration::from_secs(5));
+        } else {
+            break; // clean exit (e.g. Quit menu item called process::exit)
+        }
     });
-    let handle = service.handle();
-    service.spawn();
-    TrayHandle(handle)
+
+    TrayHandle(shared_handle)
 }
