@@ -88,72 +88,106 @@ fn find_target<'a>(sys: &System, apps: &'a [KillableApp]) -> Option<(Vec<Pid>, &
     None
 }
 
-fn notify_and_wait(app_label: &str, free_mb: u64, countdown_secs: u64) -> bool {
-    let body = format!(
-        "Free RAM: {free_mb} MB\nWill kill \"{app_label}\" in {countdown_secs}s to recover memory."
-    );
-    let (tx, rx) = mpsc::channel::<bool>();
+/// The user's call on a pending kill.
+enum Verdict {
+    /// User hit "Stand Down" — spare the target and snooze.
+    Spared,
+    /// User hit "Waste It Now" — skip the countdown and kill immediately.
+    KillNow,
+    /// Countdown ran out (or the warning was dismissed) — the target gets wasted.
+    Expired,
+}
+
+fn warning_body(app_label: &str, free_mb: u64, remaining: u64) -> String {
+    format!(
+        "Memory's bleeding out — only {free_mb} MB left.\n\"{app_label}\" gets wasted in {remaining}s. Nothing personal."
+    )
+}
+
+fn notify_and_wait(app_label: &str, free_mb: u64, countdown_secs: u64) -> Verdict {
+    let body = warning_body(app_label, free_mb, countdown_secs);
+    let (tx, rx) = mpsc::channel::<Verdict>();
     let app_label_owned = app_label.to_owned();
 
     thread::spawn(move || {
         let handle = match Notification::new()
-            .summary("⚠️ Low Memory Warning")
+            .summary("🔪 RAMBO HAS A TARGET")
             .body(&body)
             .icon("dialog-warning")
             .hint(Hint::SoundName("dialog-warning".to_owned()))
             .urgency(Urgency::Critical)
             .timeout(Timeout::Milliseconds((countdown_secs * 1000) as u32))
-            .action("cancel", "Don't Kill")
+            .action("cancel", "Stand Down")
+            .action("kill_now", "Waste It Now")
             .show()
         {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!("Notification failed: {e}");
-                let _ = tx.send(false);
+                let _ = tx.send(Verdict::Expired);
                 return;
             }
         };
 
         let notif_id = handle.id();
-        let free_mb_clone = free_mb;
         let app_label_for_updater = app_label_owned.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_updater = Arc::clone(&stop);
 
         thread::spawn(move || {
+            // Re-display the countdown each second, keeping the latest handle so
+            // we can dismiss the popup the moment the timer hits zero. Critical
+            // notifications don't auto-expire on KDE/GNOME, so we close it ourselves.
+            let mut last_handle = None;
             for remaining in (1..countdown_secs).rev() {
                 thread::sleep(Duration::from_secs(1));
                 if stop_updater.load(Ordering::Relaxed) {
-                    break;
+                    // User acted — the server already dismissed the popup on the click.
+                    return;
                 }
-                let updated_body = format!(
-                    "Free RAM: {free_mb_clone} MB\nWill kill \"{app_label_for_updater}\" in {remaining}s to recover memory."
-                );
-                let _ = Notification::new()
-                    .summary("⚠️ Low Memory Warning")
-                    .body(&updated_body)
+                last_handle = Notification::new()
+                    .summary("🔪 RAMBO HAS A TARGET")
+                    .body(&warning_body(&app_label_for_updater, free_mb, remaining))
                     .icon("dialog-warning")
                     .urgency(Urgency::Critical)
                     .timeout(Timeout::Milliseconds((remaining * 1000) as u32))
-                    .action("cancel", "Don't Kill")
+                    .action("cancel", "Stand Down")
+                    .action("kill_now", "Waste It Now")
                     .id(notif_id)
-                    .show();
+                    .show()
+                    .ok();
+            }
+            // Timer's down. Sleep out the final second, then make the popup vanish.
+            thread::sleep(Duration::from_secs(1));
+            if !stop_updater.load(Ordering::Relaxed) {
+                if let Some(h) = last_handle {
+                    h.close();
+                }
             }
         });
 
         handle.wait_for_action(|action| {
-            let cancelled = action == "cancel";
-            if cancelled {
-                stop.store(true, Ordering::Relaxed);
-                tracing::info!(app = %app_label_owned, "User cancelled kill");
-            }
-            let _ = tx.send(cancelled);
+            let verdict = match action {
+                "cancel" => {
+                    stop.store(true, Ordering::Relaxed);
+                    tracing::info!(app = %app_label_owned, "User cancelled kill");
+                    Verdict::Spared
+                }
+                "kill_now" => {
+                    stop.store(true, Ordering::Relaxed);
+                    tracing::info!(app = %app_label_owned, "User requested immediate kill");
+                    Verdict::KillNow
+                }
+                // "__closed" — popup dismissed without an action.
+                _ => Verdict::Expired,
+            };
+            let _ = tx.send(verdict);
         });
     });
 
     match rx.recv_timeout(Duration::from_secs(countdown_secs + 2)) {
-        Ok(cancelled) => cancelled,
-        Err(_) => false,
+        Ok(verdict) => verdict,
+        Err(_) => Verdict::Expired,
     }
 }
 
@@ -200,8 +234,10 @@ fn kill_process(sys: &mut System, pids: &[Pid], app_label: &str) {
     let total = graceful_count + force_killed;
     if total > 0 {
         let _ = Notification::new()
-            .summary("🔴 Process Killed")
-            .body(&format!("Killed {total} \"{app_label}\" process(es) to recover memory."))
+            .summary("💥 TARGET ELIMINATED")
+            .body(&format!(
+                "Took down {total} \"{app_label}\" process(es). Memory reclaimed. Move out."
+            ))
             .icon("dialog-warning")
             .hint(Hint::SoundName("complete".to_owned()))
             .urgency(Urgency::Normal)
@@ -258,16 +294,21 @@ pub fn run(config: Arc<Mutex<Config>>, shared_ram: SharedRamMb, shared_pressure:
             if let Some((pids, app)) = find_target(&sys, &cfg.killable_apps) {
                 let app_label = app.label().to_owned();
                 tracing::info!(count = pids.len(), "Target found: {app_label}");
-                let cancelled = notify_and_wait(&app_label, free_mb, cfg.countdown_seconds);
 
-                if cancelled {
-                    snooze_until =
-                        Some(Instant::now() + Duration::from_secs(cfg.snooze_seconds));
-                    tracing::info!(seconds = cfg.snooze_seconds, "Snoozed: kill of {app_label} cancelled by user");
-                } else {
-                    push_kill_event(&kill_events, app_label.clone());
-                    kill_process(&mut sys, &pids, &app_label);
-                    thread::sleep(Duration::from_secs(3));
+                match notify_and_wait(&app_label, free_mb, cfg.countdown_seconds) {
+                    Verdict::Spared => {
+                        snooze_until =
+                            Some(Instant::now() + Duration::from_secs(cfg.snooze_seconds));
+                        tracing::info!(seconds = cfg.snooze_seconds, "Snoozed: kill of {app_label} cancelled by user");
+                    }
+                    verdict => {
+                        if matches!(verdict, Verdict::KillNow) {
+                            tracing::info!(app = %app_label, "Immediate kill requested by user");
+                        }
+                        push_kill_event(&kill_events, app_label.clone());
+                        kill_process(&mut sys, &pids, &app_label);
+                        thread::sleep(Duration::from_secs(3));
+                    }
                 }
             } else {
                 tracing::info!(
