@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Largest threshold the settings UI allows; also the upper bound used to
+/// detect and recover a config poisoned with a sentinel value.
+pub const MAX_THRESHOLD_MB: u64 = 65536;
+/// Threshold used for new installs and when recovering an out-of-range value.
+pub const DEFAULT_THRESHOLD_MB: u64 = 2048;
+
 #[derive(Debug, Serialize, Deserialize, Clone, Hash)]
 pub struct KillableApp {
     /// Process name to match (substring match, case-insensitive)
@@ -18,6 +24,10 @@ fn default_true() -> bool {
 
 fn default_pressure_threshold() -> f64 {
     25.0
+}
+
+fn default_sound_volume() -> u8 {
+    100
 }
 
 impl KillableApp {
@@ -42,12 +52,26 @@ pub struct Config {
     pub use_memory_pressure: bool,
     #[serde(default = "default_pressure_threshold")]
     pub pressure_threshold_pct: f64,
+    /// Play the alert sound with the warning notification
+    #[serde(default = "default_true")]
+    pub warning_sound_enabled: bool,
+    /// Play the gunshot sound when a target is killed
+    #[serde(default = "default_true")]
+    pub kill_sound_enabled: bool,
+    /// Playback volume for both sounds, 0–100%
+    #[serde(default = "default_sound_volume")]
+    pub sound_volume_pct: u8,
+    /// Test Mode: forces the kill logic to trigger regardless of free RAM.
+    /// Never persisted — it's a transient override that resets on restart, so
+    /// it can't poison the saved threshold.
+    #[serde(skip)]
+    pub test_override: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            threshold_mb: 500,
+            threshold_mb: DEFAULT_THRESHOLD_MB,
             countdown_seconds: 30,
             check_interval_seconds: 5,
             snooze_seconds: 300,
@@ -62,6 +86,10 @@ impl Default for Config {
             ],
             use_memory_pressure: true,
             pressure_threshold_pct: 25.0,
+            warning_sound_enabled: true,
+            kill_sound_enabled: true,
+            sound_volume_pct: 100,
+            test_override: false,
         }
     }
 }
@@ -102,7 +130,14 @@ impl Config {
         if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(content) => match toml::from_str::<Config>(&content) {
-                    Ok(config) => return config,
+                    Ok(mut config) => {
+                        // Repair an out-of-range value and rewrite it so the fix
+                        // survives, rather than re-reading the poisoned file next start.
+                        if config.sanitize() {
+                            let _ = config.save();
+                        }
+                        return config;
+                    }
                     Err(e) => tracing::warn!(error = %e, "Failed to parse config"),
                 },
                 Err(e) => tracing::warn!(error = %e, "Failed to read config"),
@@ -115,6 +150,22 @@ impl Config {
             tracing::info!(path = %path.display(), "Created default config");
         }
         default
+    }
+
+    /// Repair values that are out of the range the UI permits. In particular a
+    /// `threshold_mb` of `u64::MAX` (left behind by an older Test Mode that
+    /// mutated the persisted threshold) is reset to a sane default. Returns
+    /// `true` if anything was changed.
+    fn sanitize(&mut self) -> bool {
+        if self.threshold_mb > MAX_THRESHOLD_MB {
+            tracing::warn!(
+                threshold = self.threshold_mb,
+                "threshold out of range; resetting to {DEFAULT_THRESHOLD_MB}"
+            );
+            self.threshold_mb = DEFAULT_THRESHOLD_MB;
+            return true;
+        }
+        false
     }
 
     pub fn save(&self) -> std::io::Result<()> {

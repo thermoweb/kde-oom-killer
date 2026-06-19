@@ -4,6 +4,7 @@ mod history;
 mod log_capture;
 mod monitor;
 mod settings;
+mod sound;
 
 use clap::Parser;
 use config::Config;

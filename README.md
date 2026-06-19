@@ -22,6 +22,10 @@ Works on **KDE Plasma** and **GNOME** (see [GNOME compatibility](#gnome-compatib
 - Linux (KDE or GNOME)
 - Rust toolchain (`curl https://sh.rustup.rs | sh`)
 - `libdbus-1-dev` (for system tray / notifications)
+- An audio player on `PATH` for notification sounds (`pw-play`, `paplay`,
+  `canberra-gtk-play`, `ogg123`, `ffplay`, or `mpv` — usually already present)
+- `ffmpeg` *(optional)* — only needed to play sounds below 100% volume; without
+  it, sounds play at full volume
 
 ```bash
 sudo apt install libdbus-1-dev   # Debian/Ubuntu

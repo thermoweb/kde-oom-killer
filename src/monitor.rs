@@ -1,6 +1,7 @@
 use crate::config::{Config, KillableApp};
 use crate::history::{SharedKillEvents, push_kill_event};
-use notify_rust::{Hint, Notification, Timeout, Urgency};
+use crate::sound;
+use notify_rust::{Notification, Timeout, Urgency};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -104,23 +105,30 @@ fn warning_body(app_label: &str, free_mb: u64, remaining: u64) -> String {
     )
 }
 
-fn notify_and_wait(app_label: &str, free_mb: u64, countdown_secs: u64) -> Verdict {
+fn notify_and_wait(
+    app_label: &str,
+    free_mb: u64,
+    countdown_secs: u64,
+    warning_volume: Option<u8>,
+) -> Verdict {
     let body = warning_body(app_label, free_mb, countdown_secs);
     let (tx, rx) = mpsc::channel::<Verdict>();
     let app_label_owned = app_label.to_owned();
 
     thread::spawn(move || {
-        let handle = match Notification::new()
-            .summary("🔪 RAMBO HAS A TARGET")
+        let mut notif = Notification::new();
+        notif
+            .summary("RAMBO HAS A TARGET")
             .body(&body)
             .icon("dialog-warning")
-            .hint(Hint::SoundName("dialog-warning".to_owned()))
             .urgency(Urgency::Critical)
             .timeout(Timeout::Milliseconds((countdown_secs * 1000) as u32))
             .action("cancel", "Stand Down")
-            .action("kill_now", "Waste It Now")
-            .show()
-        {
+            .action("kill_now", "Waste It Now");
+        if let Some(vol) = warning_volume {
+            sound::play_warning(vol);
+        }
+        let handle = match notif.show() {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!("Notification failed: {e}");
@@ -146,7 +154,7 @@ fn notify_and_wait(app_label: &str, free_mb: u64, countdown_secs: u64) -> Verdic
                     return;
                 }
                 last_handle = Notification::new()
-                    .summary("🔪 RAMBO HAS A TARGET")
+                    .summary("RAMBO HAS A TARGET")
                     .body(&warning_body(&app_label_for_updater, free_mb, remaining))
                     .icon("dialog-warning")
                     .urgency(Urgency::Critical)
@@ -191,7 +199,7 @@ fn notify_and_wait(app_label: &str, free_mb: u64, countdown_secs: u64) -> Verdic
     }
 }
 
-fn kill_process(sys: &mut System, pids: &[Pid], app_label: &str) {
+fn kill_process(sys: &mut System, pids: &[Pid], app_label: &str, kill_volume: Option<u8>) {
     sys.refresh_processes();
 
     let mut term_sent = 0usize;
@@ -233,16 +241,19 @@ fn kill_process(sys: &mut System, pids: &[Pid], app_label: &str) {
 
     let total = graceful_count + force_killed;
     if total > 0 {
-        let _ = Notification::new()
-            .summary("💥 TARGET ELIMINATED")
+        let mut notif = Notification::new();
+        notif
+            .summary("TARGET ELIMINATED")
             .body(&format!(
                 "Took down {total} \"{app_label}\" process(es). Memory reclaimed. Move out."
             ))
             .icon("dialog-warning")
-            .hint(Hint::SoundName("complete".to_owned()))
             .urgency(Urgency::Normal)
-            .timeout(Timeout::Milliseconds(5000))
-            .show();
+            .timeout(Timeout::Milliseconds(5000));
+        if let Some(vol) = kill_volume {
+            sound::play_kill(vol);
+        }
+        let _ = notif.show();
     } else {
         tracing::info!(app = app_label, "processes already gone");
     }
@@ -268,7 +279,8 @@ pub fn run(config: Arc<Mutex<Config>>, shared_ram: SharedRamMb, shared_pressure:
 
         let snoozing = snooze_until.map_or(false, |t| Instant::now() < t);
 
-        let ram_trigger = free_mb < cfg.threshold_mb;
+        // Test Mode forces a trigger without touching the configured threshold.
+        let ram_trigger = cfg.test_override || free_mb < cfg.threshold_mb;
         let pressure_trigger =
             cfg.use_memory_pressure && pressure_val >= cfg.pressure_threshold_pct;
 
@@ -295,7 +307,11 @@ pub fn run(config: Arc<Mutex<Config>>, shared_ram: SharedRamMb, shared_pressure:
                 let app_label = app.label().to_owned();
                 tracing::info!(count = pids.len(), "Target found: {app_label}");
 
-                match notify_and_wait(&app_label, free_mb, cfg.countdown_seconds) {
+                let warning_volume = cfg
+                    .warning_sound_enabled
+                    .then_some(cfg.sound_volume_pct);
+                let kill_volume = cfg.kill_sound_enabled.then_some(cfg.sound_volume_pct);
+                match notify_and_wait(&app_label, free_mb, cfg.countdown_seconds, warning_volume) {
                     Verdict::Spared => {
                         snooze_until =
                             Some(Instant::now() + Duration::from_secs(cfg.snooze_seconds));
@@ -306,7 +322,7 @@ pub fn run(config: Arc<Mutex<Config>>, shared_ram: SharedRamMb, shared_pressure:
                             tracing::info!(app = %app_label, "Immediate kill requested by user");
                         }
                         push_kill_event(&kill_events, app_label.clone());
-                        kill_process(&mut sys, &pids, &app_label);
+                        kill_process(&mut sys, &pids, &app_label, kill_volume);
                         thread::sleep(Duration::from_secs(3));
                     }
                 }

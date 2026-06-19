@@ -1,9 +1,10 @@
 use crate::config::{Config, KillableApp};
 use crate::monitor::{SharedPressure, SharedRamMb, pressure_from_shared};
+use crate::sound;
 use eframe::egui;
 use egui::{CentralPanel, ScrollArea};
 use egui_dnd::dnd;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 /// Opens the settings window. Blocks until the window is closed.
@@ -24,8 +25,6 @@ pub fn open_blocking(
 
     let new_name = Arc::new(Mutex::new(String::new()));
     let new_display = Arc::new(Mutex::new(String::new()));
-    let test_mode_active = Arc::new(AtomicBool::new(false));
-    let saved_threshold = Arc::new(AtomicU64::new(0));
 
     let _ = eframe::run_simple_native("rambo-settings", options, move |ctx, _frame| {
         ctx.set_pixels_per_point(1.2);
@@ -111,6 +110,69 @@ pub fn open_blocking(
                                 changed |= ui.add(egui::DragValue::new(&mut local.pressure_threshold_pct).range(1.0..=100.0).speed(0.5)).changed();
                                 ui.end_row();
                             }
+                        });
+
+                    if changed {
+                        let mut cfg = config.lock().unwrap();
+                        *cfg = local;
+                        let _ = cfg.save();
+                    }
+                });
+
+                ui.add_space(12.0);
+
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Sounds").strong());
+                    ui.add_space(4.0);
+
+                    let mut local = config.lock().unwrap().clone();
+                    let mut changed = false;
+
+                    egui::Grid::new("sounds_grid")
+                        .num_columns(2)
+                        .spacing([16.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label("Warning alert sound");
+                            ui.horizontal(|ui| {
+                                changed |= ui
+                                    .checkbox(&mut local.warning_sound_enabled, "")
+                                    .changed();
+                                if ui
+                                    .add_enabled(
+                                        local.warning_sound_enabled,
+                                        egui::Button::new("▶ Test"),
+                                    )
+                                    .clicked()
+                                {
+                                    sound::play_warning(local.sound_volume_pct);
+                                }
+                            });
+                            ui.end_row();
+
+                            ui.label("Kill gunshot sound");
+                            ui.horizontal(|ui| {
+                                changed |=
+                                    ui.checkbox(&mut local.kill_sound_enabled, "").changed();
+                                if ui
+                                    .add_enabled(
+                                        local.kill_sound_enabled,
+                                        egui::Button::new("▶ Test"),
+                                    )
+                                    .clicked()
+                                {
+                                    sound::play_kill(local.sound_volume_pct);
+                                }
+                            });
+                            ui.end_row();
+
+                            ui.label("Volume");
+                            changed |= ui
+                                .add(
+                                    egui::Slider::new(&mut local.sound_volume_pct, 0..=100)
+                                        .suffix("%"),
+                                )
+                                .changed();
+                            ui.end_row();
                         });
 
                     if changed {
@@ -227,26 +289,21 @@ pub fn open_blocking(
                     ui.label(egui::RichText::new("Test Mode").strong());
                     ui.add_space(4.0);
 
-                    let is_active = test_mode_active.load(Ordering::Relaxed);
+                    let is_active = config.lock().unwrap().test_override;
                     if is_active {
                         ui.colored_label(
                             egui::Color32::from_rgb(220, 50, 50),
-                            "⚠ Test mode active — threshold set to maximum",
+                            "⚠ Test mode active — kill logic forced to trigger",
                         );
                         ui.add_space(4.0);
                         if ui.button("Deactivate").clicked() {
-                            let old = saved_threshold.load(Ordering::Relaxed);
-                            config.lock().unwrap().threshold_mb = old;
-                            test_mode_active.store(false, Ordering::Relaxed);
+                            config.lock().unwrap().test_override = false;
                         }
                     } else {
-                        ui.label("Temporarily set threshold to maximum to trigger kill logic.");
+                        ui.label("Force the kill logic to trigger regardless of free RAM.");
                         ui.add_space(4.0);
                         if ui.button("Test Mode").clicked() {
-                            let current = config.lock().unwrap().threshold_mb;
-                            saved_threshold.store(current, Ordering::Relaxed);
-                            config.lock().unwrap().threshold_mb = u64::MAX;
-                            test_mode_active.store(true, Ordering::Relaxed);
+                            config.lock().unwrap().test_override = true;
                         }
                     }
                 });
