@@ -107,15 +107,18 @@ name, so `"firefox"` matches `firefox`, `firefox-bin`, etc.
 
 ## GNOME compatibility
 
-rambo works on GNOME in two modes depending on whether you have the
-[AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/)
-extension installed.
+GNOME has no built-in system tray, so the tray icon needs an **AppIndicator
+host extension** that is both *installed* and *enabled*. Either of these works:
 
-**With the extension (recommended)** — full experience, identical to KDE.
-The system tray icon appears and everything works out of the box.
-`./install.sh` detects this automatically and builds the right binary.
+- [AppIndicator and KStatusNotifierItem Support](https://extensions.gnome.org/extension/615/appindicator-support/) — `appindicatorsupport@rgcjonas.gmail.com`
+- **Ubuntu AppIndicators** — `ubuntu-appindicators@ubuntu.com` (shipped and enabled by default on Ubuntu GNOME)
 
-Install the extension via your package manager:
+**With one of these enabled (recommended)** — full experience, identical to KDE.
+The system tray icon appears and everything works out of the box. `./install.sh`
+detects either extension, and if it's installed but disabled, enables it for you.
+
+Install the extension via your package manager (skip this on Ubuntu — it's
+already there):
 
 ```bash
 sudo apt install gnome-shell-extension-appindicator   # Ubuntu / Debian
@@ -124,7 +127,11 @@ sudo dnf install gnome-shell-extension-appindicator   # Fedora
 
 Or from the browser: [extensions.gnome.org/extension/615](https://extensions.gnome.org/extension/615/appindicator-support/)
 
-Then log out and back in (or run `gnome-extensions enable appindicatorsupport@rgcjonas.gmail.com`).
+Then log out and back in. To check what you have:
+
+```bash
+gnome-extensions list --enabled | grep -i appindicator
+```
 
 **Without the extension** — fallback mode. No tray icon, but monitoring,
 process killing, and desktop notifications all work normally. The settings
